@@ -1,0 +1,2135 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>PontoVirtual</title>
+
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Font Awesome -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css"
+        referrerpolicy="no-referrer" />
+
+  <style>
+    :root {
+      color-scheme: light;
+    }
+
+    html, body {
+      min-height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(59,130,246,.12), transparent 28%),
+        radial-gradient(circle at bottom right, rgba(15,23,42,.08), transparent 32%),
+        #f8fafc;
+    }
+
+    body {
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior-y: contain;
+    }
+
+    .app-shell {
+      min-height: 100dvh;
+    }
+
+    .glass {
+      background: rgba(255,255,255,.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+
+    .safe-bottom {
+      padding-bottom: max(1rem, env(safe-area-inset-bottom));
+    }
+
+    .camera-stage {
+      position: relative;
+      background: #020617;
+      overflow: hidden;
+      min-height: 58vh;
+    }
+
+    .camera-stage video,
+    .camera-stage img {
+      width: 100%;
+      height: 100%;
+      min-height: 58vh;
+      object-fit: cover;
+      display: block;
+    }
+
+    .camera-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(to bottom, rgba(2,6,23,.35), transparent 22%, transparent 68%, rgba(2,6,23,.55));
+    }
+
+    .shutter {
+      width: 78px;
+      height: 78px;
+      border-radius: 9999px;
+      background: #ef4444;
+      border: 6px solid rgba(255,255,255,.95);
+      box-shadow: 0 8px 30px rgba(0,0,0,.32);
+      transition: transform .12s ease, filter .12s ease;
+    }
+
+    .shutter:active {
+      transform: scale(.93);
+      filter: brightness(.9);
+    }
+
+    .tab-btn.active {
+      background: #0f172a;
+      color: white;
+      box-shadow: 0 8px 20px rgba(15,23,42,.15);
+    }
+
+    .feed-media {
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      width: 100%;
+      background: #e2e8f0;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    .scrollbar-thin::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 999px;
+    }
+
+    @media (min-width: 1024px) {
+      .app-shell {
+        min-height: 100vh;
+      }
+      .camera-stage,
+      .camera-stage video,
+      .camera-stage img {
+        min-height: 70vh;
+        max-height: 76vh;
+      }
+    }
+  </style>
+</head>
+
+<body class="text-slate-800">
+  <div id="app" class="app-shell"></div>
+
+  <canvas id="captureCanvas" class="hidden"></canvas>
+
+  <script>
+    // ============================================================
+    // PontoVirtual - Aplicação SPA em memória
+    // Banco inicial propositalmente vazio.
+    // ============================================================
+
+    const state = {
+      collaborators: [],
+      services: [],
+      feed: [],
+      currentProfile: null,
+      currentCollaboratorId: null,
+      currentServiceId: null,
+      companyTab: 'dashboard',
+      calendarMonth: null,
+      captureType: null,
+      mediaStream: null,
+      currentPosition: null,
+      capturedImage: null,
+      capturedMeta: null,
+      cameraError: null,
+      gpsError: null,
+    };
+
+    const $app = document.getElementById('app');
+    const $canvas = document.getElementById('captureCanvas');
+
+    const escapeHTML = (value = '') =>
+      String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+
+    const uid = (prefix) =>
+      `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const pad = n => String(n).padStart(2, '0');
+
+    function formatDateTime(dateInput) {
+      const d = new Date(dateInput);
+      return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+
+    function todayISO() {
+      const d = new Date();
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    }
+
+    function serviceDateLabel(service) {
+      if (!service.date) return 'Hoje';
+      const [y,m,d] = service.date.split('-');
+      return `${d}/${m}/${y}`;
+    }
+
+    // Retorna a chave "AAAA-MM" de uma data ISO (ou "sem-data" se ausente).
+    function monthKey(dateISO) {
+      return dateISO ? dateISO.slice(0, 7) : 'sem-data';
+    }
+
+    // Retorna um rótulo legível em pt-BR para uma chave "AAAA-MM", ex.: "Setembro de 2026".
+    function monthLabel(key) {
+      if (!key || key === 'sem-data') return 'Sem data definida';
+      const [y, m] = key.split('-').map(Number);
+      const d = new Date(y, m - 1, 1);
+      const label = d.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+      return label.charAt(0).toUpperCase() + label.slice(1);
+    }
+
+    function getCollaborator(id) {
+      return state.collaborators.find(c => c.id === id);
+    }
+
+    function getService(id) {
+      return state.services.find(s => s.id === id);
+    }
+
+    function stopCamera() {
+      if (state.mediaStream) {
+        state.mediaStream.getTracks().forEach(track => track.stop());
+        state.mediaStream = null;
+      }
+    }
+
+    function resetCaptureState() {
+      stopCamera();
+      state.captureType = null;
+      state.currentPosition = null;
+      state.capturedImage = null;
+      state.capturedMeta = null;
+      state.cameraError = null;
+      state.gpsError = null;
+    }
+
+    function toast(message, type = 'success') {
+      const existing = document.getElementById('pv-toast');
+      if (existing) existing.remove();
+
+      const tones = {
+        success: 'bg-emerald-600',
+        error: 'bg-red-600',
+        info: 'bg-slate-900'
+      };
+
+      const el = document.createElement('div');
+      el.id = 'pv-toast';
+      el.className = `fixed z-[100] left-1/2 -translate-x-1/2 bottom-6 ${tones[type] || tones.info} text-white px-4 py-3 rounded-2xl shadow-2xl text-sm font-semibold max-w-[90vw] text-center`;
+      el.textContent = message;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 2800);
+    }
+
+    function brandHeader({ title = 'PontoVirtual', subtitle = '', backAction = '' } = {}) {
+      return `
+        <header class="sticky top-0 z-40 glass border-b border-slate-200/80">
+          <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 min-w-0">
+              ${backAction ? `
+                <button onclick="${backAction}" class="w-10 h-10 shrink-0 rounded-xl bg-slate-100 hover:bg-slate-200 grid place-items-center" aria-label="Voltar">
+                  <i class="fa-solid fa-arrow-left"></i>
+                </button>
+              ` : `
+                <div class="w-10 h-10 shrink-0 rounded-2xl bg-slate-900 text-white grid place-items-center shadow-lg shadow-slate-900/15">
+                  <i class="fa-solid fa-location-dot"></i>
+                </div>
+              `}
+              <div class="min-w-0">
+                <h1 class="font-black text-slate-900 leading-tight truncate">${escapeHTML(title)}</h1>
+                ${subtitle ? `<p class="text-xs text-slate-500 truncate">${escapeHTML(subtitle)}</p>` : ''}
+              </div>
+            </div>
+            <div class="text-[11px] font-bold uppercase tracking-widest text-slate-400 hidden sm:block">
+              Registro com câmera + GPS
+            </div>
+          </div>
+        </header>
+      `;
+    }
+
+    function renderProfileSelect() {
+      resetCaptureState();
+      state.currentProfile = null;
+      state.currentCollaboratorId = null;
+      state.currentServiceId = null;
+
+      $app.innerHTML = `
+        <main class="min-h-[100dvh] flex items-center justify-center px-4 py-8">
+          <div class="w-full max-w-5xl">
+            <div class="text-center mb-8 sm:mb-10">
+              <div class="w-20 h-20 mx-auto rounded-[28px] bg-slate-900 text-white grid place-items-center text-3xl shadow-2xl shadow-slate-900/20 mb-5">
+                <i class="fa-solid fa-location-dot"></i>
+              </div>
+              <h1 class="text-3xl sm:text-4xl font-black tracking-tight text-slate-900">PontoVirtual</h1>
+              <p class="mt-3 text-slate-500 max-w-xl mx-auto">
+                Gestão de equipes, serviços, comprovação de presença e registros fotográficos com data, hora e localização.
+              </p>
+            </div>
+
+            <div class="grid md:grid-cols-2 gap-4 sm:gap-6">
+              <button onclick="enterCompany()" class="group text-left bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="w-14 h-14 rounded-2xl bg-blue-50 text-blue-600 grid place-items-center text-2xl">
+                    <i class="fa-solid fa-building"></i>
+                  </div>
+                  <i class="fa-solid fa-arrow-right text-slate-300 group-hover:text-slate-900 transition"></i>
+                </div>
+                <h2 class="mt-7 text-2xl font-black text-slate-900">EMPRESA</h2>
+                <p class="mt-2 text-sm leading-6 text-slate-500">
+                  Cadastre colaboradores, agende serviços e acompanhe o feed de auditoria em tempo real.
+                </p>
+              </button>
+
+              <button onclick="renderCollaboratorLogin()" class="group text-left bg-slate-900 text-white rounded-3xl p-6 sm:p-8 shadow-xl shadow-slate-900/15 hover:-translate-y-1 transition-all">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="w-14 h-14 rounded-2xl bg-white/10 text-white grid place-items-center text-2xl">
+                    <i class="fa-solid fa-user-check"></i>
+                  </div>
+                  <i class="fa-solid fa-arrow-right text-white/40 group-hover:text-white transition"></i>
+                </div>
+                <h2 class="mt-7 text-2xl font-black">COLABORADOR</h2>
+                <p class="mt-2 text-sm leading-6 text-slate-300">
+                  Acesse sua agenda do dia e publique ponto ou registros do serviço usando câmera e GPS.
+                </p>
+              </button>
+            </div>
+
+            <p class="text-center text-xs text-slate-400 mt-8">
+              Dados mantidos somente em memória nesta demonstração. Ao recarregar a página, os registros são apagados.
+            </p>
+          </div>
+        </main>
+      `;
+    }
+
+    function enterCompany() {
+      state.currentProfile = 'company';
+      state.companyTab = 'dashboard';
+      renderCompany();
+    }
+
+    function renderCompany() {
+      resetCaptureState();
+      const tabs = [
+        ['dashboard', 'fa-chart-line', 'Visão geral'],
+        ['collaborators', 'fa-user-plus', 'Cadastrar Colaborador'],
+        ['schedule', 'fa-calendar-plus', 'Agendar Serviço'],
+        ['calendar', 'fa-calendar-days', 'Calendário'],
+        ['points', 'fa-user-clock', 'Pontos'],
+        ['contents', 'fa-folder-open', 'Conteúdos'],
+      ];
+
+      $app.innerHTML = `
+        ${brandHeader({title:'PontoVirtual', subtitle:'Painel Gestor'})}
+
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8">
+          <div class="flex flex-col lg:flex-row gap-5 lg:gap-8">
+
+            <aside class="lg:w-64 shrink-0">
+              <div class="bg-white border border-slate-200 rounded-2xl p-2 shadow-sm lg:sticky lg:top-24">
+                <div class="flex lg:flex-col gap-2 overflow-x-auto scrollbar-thin">
+                  ${tabs.map(([id, icon, label]) => `
+                    <button onclick="setCompanyTab('${id}')"
+                      class="tab-btn ${state.companyTab === id ? 'active' : ''} min-w-max lg:min-w-0 w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold text-slate-600 hover:bg-slate-100 transition">
+                      <i class="fa-solid ${icon} w-5 text-center"></i>
+                      <span>${label}</span>
+                    </button>
+                  `).join('')}
+                </div>
+
+                <button onclick="renderProfileSelect()"
+                  class="mt-2 w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold text-red-600 hover:bg-red-50 transition">
+                  <i class="fa-solid fa-right-from-bracket w-5 text-center"></i>
+                  Sair
+                </button>
+              </div>
+            </aside>
+
+            <section class="min-w-0 flex-1">
+              ${renderCompanyTab()}
+            </section>
+          </div>
+        </div>
+      `;
+    }
+
+    function setCompanyTab(tab) {
+      state.companyTab = tab;
+      renderCompany();
+    }
+
+    function renderCompanyTab() {
+      if (state.companyTab === 'collaborators') return companyCollaboratorsView();
+      if (state.companyTab === 'schedule') return companyScheduleView();
+      if (state.companyTab === 'calendar') return companyCalendarView();
+      if (state.companyTab === 'points') return companyRecordsView('ponto');
+      if (state.companyTab === 'contents') return companyRecordsView('conteudo');
+      if (state.companyTab === 'feed') return companyFeedView();
+      return companyDashboardView();
+    }
+
+    function companyDashboardView() {
+      const today = todayISO();
+      const todayServices = state.services.filter(s => s.date === today);
+      const pointsToday = state.feed.filter(f => f.type === 'ponto' && f.dateISO === today).length;
+      const contentsToday = state.feed.filter(f => f.type === 'conteudo' && f.dateISO === today).length;
+
+      return `
+        <div class="mb-6">
+          <p class="text-sm font-bold text-blue-600 uppercase tracking-widest">Painel Gestor</p>
+          <h2 class="text-3xl font-black tracking-tight text-slate-900 mt-1">Visão geral</h2>
+          <p class="text-slate-500 mt-2">Resumo atual da operação. Nenhum dado fictício é criado automaticamente.</p>
+        </div>
+
+        <div class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          ${metricCard('Colaboradores', state.collaborators.length, 'fa-users', 'blue')}
+          ${metricCard('Serviços hoje', todayServices.length, 'fa-briefcase', 'violet')}
+          ${metricCard('Pontos hoje', pointsToday, 'fa-user-clock', 'emerald')}
+          ${metricCard('Conteúdos hoje', contentsToday, 'fa-camera', 'amber')}
+        </div>
+
+        <div class="grid xl:grid-cols-2 gap-5 mt-6">
+          <div class="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h3 class="font-black text-lg text-slate-900">Serviços de hoje</h3>
+                <p class="text-sm text-slate-500">Ordens agendadas para ${new Date().toLocaleDateString('pt-BR')}.</p>
+              </div>
+              <button onclick="setCompanyTab('schedule')" class="text-sm font-bold text-blue-600 hover:underline">Agendar</button>
+            </div>
+            <div class="mt-5 space-y-3">
+              ${todayServices.length ? todayServices
+                .sort((a,b) => a.time.localeCompare(b.time))
+                .map(serviceCardCompact).join('') : emptyState('fa-calendar-day', 'Nenhum serviço agendado para hoje.')}
+            </div>
+          </div>
+
+          <div class="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h3 class="font-black text-lg text-slate-900">Últimos registros</h3>
+                <p class="text-sm text-slate-500">Atividade mais recente enviada pelos colaboradores.</p>
+              </div>
+              <button onclick="setCompanyTab('feed')" class="text-sm font-bold text-blue-600 hover:underline">Ver feed</button>
+            </div>
+            <div class="mt-5 space-y-3">
+              ${state.feed.length ? state.feed.slice(0, 4).map(item => `
+                <div class="flex items-center gap-3 p-3 rounded-2xl bg-slate-50">
+                  <img src="${item.image}" class="w-16 h-16 rounded-xl object-cover bg-slate-200" alt="Registro">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-black uppercase tracking-wide ${item.type === 'ponto' ? 'text-emerald-600' : 'text-amber-600'}">
+                        ${item.type === 'ponto' ? 'Ponto' : 'Conteúdo'}
+                      </span>
+                    </div>
+                    <p class="font-bold truncate">${escapeHTML(item.collaboratorName)}</p>
+                    <p class="text-xs text-slate-500 truncate">${escapeHTML(item.client)} • ${escapeHTML(item.serviceName)}</p>
+                  </div>
+                </div>
+              `).join('') : emptyState('fa-camera-retro', 'O feed de auditoria ainda está vazio.')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function metricCard(label, value, icon, tone) {
+      const colors = {
+        blue: 'bg-blue-50 text-blue-600',
+        violet: 'bg-violet-50 text-violet-600',
+        emerald: 'bg-emerald-50 text-emerald-600',
+        amber: 'bg-amber-50 text-amber-600',
+      };
+      return `
+        <div class="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p class="text-sm font-bold text-slate-500">${label}</p>
+              <p class="text-3xl font-black text-slate-900 mt-1">${value}</p>
+            </div>
+            <div class="w-12 h-12 rounded-2xl ${colors[tone]} grid place-items-center text-xl">
+              <i class="fa-solid ${icon}"></i>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function serviceCardCompact(s) {
+      const c = getCollaborator(s.collaboratorId);
+      return `
+        <div class="border border-slate-200 rounded-2xl p-4">
+          <div class="flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <p class="font-black text-slate-900 truncate">${escapeHTML(s.client)}</p>
+              <p class="text-sm text-slate-600 mt-1">${escapeHTML(s.serviceName)}</p>
+              <p class="text-xs text-slate-400 mt-2">
+                <i class="fa-regular fa-user mr-1"></i>${escapeHTML(c?.name || 'Colaborador removido')}
+              </p>
+            </div>
+            <span class="shrink-0 px-3 py-1.5 rounded-full bg-slate-900 text-white text-xs font-black">
+              ${escapeHTML(s.time)}
+            </span>
+          </div>
+        </div>
+      `;
+    }
+
+    function emptyState(icon, text) {
+      return `
+        <div class="py-10 px-4 text-center rounded-2xl border-2 border-dashed border-slate-200">
+          <i class="fa-solid ${icon} text-3xl text-slate-300"></i>
+          <p class="text-sm text-slate-500 mt-3">${text}</p>
+        </div>
+      `;
+    }
+
+    function companyCollaboratorsView() {
+      return `
+        <div class="grid xl:grid-cols-[420px_1fr] gap-5">
+          <div>
+            <div class="mb-5">
+              <p class="text-sm font-bold text-blue-600 uppercase tracking-widest">Equipe</p>
+              <h2 class="text-3xl font-black tracking-tight text-slate-900 mt-1">Cadastrar colaborador</h2>
+            </div>
+
+            <form onsubmit="addCollaborator(event)" class="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm space-y-4">
+              <div>
+                <label class="block text-sm font-bold mb-2">Nome completo</label>
+                <input id="collabName" required maxlength="80"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                  placeholder="Ex.: João da Silva">
+              </div>
+
+              <div>
+                <label class="block text-sm font-bold mb-2">Login de acesso</label>
+                <input id="collabLogin" required maxlength="40" pattern="[A-Za-z0-9._-]{3,40}"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                  placeholder="Ex.: joao.silva">
+                <p class="text-xs text-slate-400 mt-1.5">Identificador usado para entrar no ambiente virtual.</p>
+              </div>
+
+              <div>
+                <label class="block text-sm font-bold mb-2">Cargo</label>
+                <input id="collabRole" required maxlength="80"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                  placeholder="Ex.: Técnico de manutenção">
+              </div>
+
+              <div>
+                <label class="block text-sm font-bold mb-2">Senha / PIN</label>
+                <input id="collabPin" required inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                  placeholder="4 a 8 números">
+                <p class="text-xs text-slate-400 mt-1.5">Usado pelo colaborador para acessar a própria agenda.</p>
+              </div>
+
+              <button class="w-full py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-black transition">
+                <i class="fa-solid fa-user-plus mr-2"></i> Cadastrar colaborador
+              </button>
+            </form>
+          </div>
+
+          <div>
+            <div class="flex items-end justify-between gap-4 mb-5">
+              <div>
+                <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Cadastrados</p>
+                <h3 class="text-2xl font-black text-slate-900 mt-1">Equipe atual</h3>
+              </div>
+              <span class="px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 text-xs font-black">
+                ${state.collaborators.length} colaborador(es)
+              </span>
+            </div>
+
+            <div class="space-y-3">
+              ${state.collaborators.length ? state.collaborators.map(c => `
+                <div class="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 shadow-sm flex items-center gap-4">
+                  <div class="w-12 h-12 shrink-0 rounded-2xl bg-blue-50 text-blue-600 grid place-items-center font-black">
+                    ${escapeHTML(c.name.trim().charAt(0).toUpperCase())}
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="font-black text-slate-900 truncate">${escapeHTML(c.name)}</p>
+                    <p class="text-sm text-slate-500 truncate">${escapeHTML(c.role)}</p>
+                    <p class="text-xs text-blue-600 font-bold mt-1">Login: ${escapeHTML(c.login)}</p>
+                  </div>
+                  <div class="text-right">
+                    <p class="text-[10px] uppercase font-black tracking-widest text-slate-400">PIN</p>
+                    <p class="font-mono font-bold tracking-[.25em] text-slate-700">••••</p>
+                  </div>
+                </div>
+              `).join('') : emptyState('fa-users', 'Nenhum colaborador cadastrado.')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function addCollaborator(event) {
+      event.preventDefault();
+
+      const name = document.getElementById('collabName').value.trim();
+      const login = document.getElementById('collabLogin').value.trim().toLowerCase();
+      const role = document.getElementById('collabRole').value.trim();
+      const pin = document.getElementById('collabPin').value.trim();
+
+      if (!name || !login || !role || !/^[a-z0-9._-]{3,40}$/.test(login) || !/^\d{4,8}$/.test(pin)) {
+        toast('Preencha nome, login, cargo e um PIN válido.', 'error');
+        return;
+      }
+
+      if (state.collaborators.some(c => c.login === login)) {
+        toast('Esse login já está cadastrado. Escolha outro.', 'error');
+        return;
+      }
+
+      state.collaborators.push({
+        id: uid('collab'),
+        name,
+        login,
+        role,
+        pin,
+        createdAt: new Date().toISOString()
+      });
+
+      toast('Colaborador cadastrado com sucesso.');
+      renderCompany();
+    }
+
+    function companyScheduleView() {
+      return `
+        <div class="grid xl:grid-cols-[440px_1fr] gap-5">
+          <div>
+            <div class="mb-5">
+              <p class="text-sm font-bold text-blue-600 uppercase tracking-widest">Operação</p>
+              <h2 class="text-3xl font-black tracking-tight text-slate-900 mt-1">Agendar serviço</h2>
+            </div>
+
+            <form onsubmit="addService(event)" class="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm space-y-4">
+              <div>
+                <label class="block text-sm font-bold mb-2">Colaborador</label>
+                <select id="serviceCollaborator" required
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 bg-white focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+                  <option value="">Selecione...</option>
+                  ${state.collaborators.map(c => `<option value="${c.id}">${escapeHTML(c.name)} — ${escapeHTML(c.role)}</option>`).join('')}
+                </select>
+              </div>
+
+              ${!state.collaborators.length ? `
+                <div class="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-800 text-sm">
+                  <i class="fa-solid fa-triangle-exclamation mr-2"></i>
+                  Cadastre ao menos um colaborador antes de criar uma ordem de serviço.
+                </div>
+              ` : ''}
+
+              <div>
+                <label class="block text-sm font-bold mb-2">Nome do cliente</label>
+                <input id="serviceClient" required maxlength="100"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                  placeholder="Ex.: Condomínio Solar">
+              </div>
+
+              <div>
+                <label class="block text-sm font-bold mb-2">Serviço a ser feito</label>
+                <textarea id="serviceName" required maxlength="240" rows="3"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500 resize-none"
+                  placeholder="Ex.: Manutenção preventiva do ar-condicionado"></textarea>
+              </div>
+
+              <div>
+                <label class="block text-sm font-bold mb-2">Endereço do serviço</label>
+                <input id="serviceAddress" required maxlength="240"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                  placeholder="Rua, número, bairro, cidade">
+              </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-bold mb-2">Data inicial</label>
+                  <input id="serviceDate" type="date" required value="${todayISO()}"
+                    class="w-full px-3 sm:px-4 py-3.5 rounded-2xl border border-slate-300 bg-white focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-bold mb-2">Horário</label>
+                  <input id="serviceTime" type="time" required
+                    class="w-full px-3 sm:px-4 py-3.5 rounded-2xl border border-slate-300 bg-white focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-sm font-bold mb-2">Recorrência</label>
+                <select id="serviceRecurrence"
+                  class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 bg-white focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+                  <option value="none">Somente nesta data</option>
+                  <option value="weekly">Toda semana no mesmo dia e horário</option>
+                  <option value="biweekly">A cada 2 semanas</option>
+                  <option value="monthly">Todo mês na mesma data</option>
+                </select>
+                <p class="text-xs text-slate-400 mt-2">Para recorrências, serão criadas ocorrências para os próximos 12 períodos.</p>
+              </div>
+
+              <button ${!state.collaborators.length ? 'disabled' : ''}
+                class="w-full py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-black transition">
+                <i class="fa-solid fa-calendar-plus mr-2"></i> Criar ordem de serviço
+              </button>
+            </form>
+          </div>
+
+          <div>
+            <div class="flex items-end justify-between gap-4 mb-5">
+              <div>
+                <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Agenda</p>
+                <h3 class="text-2xl font-black text-slate-900 mt-1">Ordens cadastradas</h3>
+              </div>
+              <span class="px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 text-xs font-black">
+                ${state.services.length} serviço(s)
+              </span>
+            </div>
+
+            <div class="space-y-3">
+              ${state.services.length ? [...state.services]
+                .sort((a,b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
+                .map(s => {
+                  const c = getCollaborator(s.collaboratorId);
+                  return `
+                    <div class="bg-white border ${s.cancelled ? 'border-red-200 bg-red-50/40' : 'border-slate-200'} rounded-2xl p-4 sm:p-5 shadow-sm">
+                      <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div class="min-w-0">
+                          <div class="flex flex-wrap items-center gap-2">
+                            <span class="px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-black">${serviceDateLabel(s)}</span>
+                            <span class="px-2.5 py-1 rounded-full bg-slate-900 text-white text-xs font-black">${escapeHTML(s.time)}</span>
+                            ${s.cancelled ? '<span class="px-2.5 py-1 rounded-full bg-red-600 text-white text-xs font-black"><i class="fa-solid fa-ban mr-1"></i>Cancelado</span>' : ''}
+                          </div>
+                          <p class="font-black text-lg text-slate-900 mt-3">${escapeHTML(s.client)}</p>
+                          <p class="text-sm text-slate-600 mt-1">${escapeHTML(s.serviceName)}</p>
+                          <p class="text-xs text-slate-500 mt-2"><i class="fa-solid fa-location-dot mr-1"></i>${escapeHTML(s.address || 'Endereço não informado')}</p>
+                          ${s.recurrence && s.recurrence !== 'none' ? `<p class="text-xs text-blue-600 mt-1"><i class="fa-solid fa-repeat mr-1"></i>${escapeHTML(recurrenceLabel(s.recurrence))}</p>` : ''}
+                          ${s.cancelled ? `<p class="text-xs text-red-600 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Motivo: ${escapeHTML(s.cancelReason || 'não informado')}</p>` : ''}
+                          <p class="text-xs text-slate-400 mt-3">
+                            <i class="fa-solid fa-user mr-1"></i>${escapeHTML(c?.name || 'Colaborador removido')}
+                          </p>
+                        </div>
+                        <div class="flex sm:flex-col gap-2 shrink-0">
+                          <button onclick="openEditServiceModal('${s.id}')"
+                            class="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black">
+                            <i class="fa-solid fa-pen mr-1"></i> Editar
+                          </button>
+                          <button onclick="openCancelServiceModal('${s.id}')"
+                            class="px-3 py-2 rounded-xl ${s.cancelled ? 'bg-slate-100 hover:bg-slate-200 text-slate-700' : 'bg-red-50 hover:bg-red-100 text-red-600'} text-xs font-black">
+                            <i class="fa-solid ${s.cancelled ? 'fa-rotate-left' : 'fa-ban'} mr-1"></i> ${s.cancelled ? 'Reativar' : 'Cancelar'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                }).join('') : emptyState('fa-briefcase', 'Nenhuma ordem de serviço agendada.')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function addService(event) {
+      event.preventDefault();
+
+      if (!state.collaborators.length) {
+        toast('Cadastre um colaborador primeiro.', 'error');
+        return;
+      }
+
+      const collaboratorId = document.getElementById('serviceCollaborator').value;
+      const client = document.getElementById('serviceClient').value.trim();
+      const serviceName = document.getElementById('serviceName').value.trim();
+      const address = document.getElementById('serviceAddress').value.trim();
+      const date = document.getElementById('serviceDate').value;
+      const time = document.getElementById('serviceTime').value;
+      const recurrence = document.getElementById('serviceRecurrence').value;
+
+      if (!collaboratorId || !client || !serviceName || !address || !date || !time) {
+        toast('Preencha todos os campos do serviço.', 'error');
+        return;
+      }
+
+      const base = { collaboratorId, client, serviceName, address, time, recurrence };
+      const groupId = uid('group');
+      const occurrences = [date];
+
+      if (recurrence !== 'none') {
+        const start = new Date(`${date}T12:00:00`);
+        for (let i = 1; i <= 12; i++) {
+          const next = new Date(start);
+          if (recurrence === 'weekly') next.setDate(start.getDate() + i * 7);
+          if (recurrence === 'biweekly') next.setDate(start.getDate() + i * 14);
+          if (recurrence === 'monthly') next.setMonth(start.getMonth() + i);
+          occurrences.push(next.toISOString().slice(0, 10));
+        }
+      }
+
+      occurrences.forEach((occurrenceDate, index) => {
+        state.services.push({
+          id: uid('service'),
+          ...base,
+          groupId,
+          defaultCaption: null,
+          cancelled: false,
+          cancelReason: null,
+          cancelledAt: null,
+          date: occurrenceDate,
+          recurrenceIndex: index,
+          createdAt: new Date().toISOString()
+        });
+      });
+
+      toast(`${occurrences.length} serviço(s) agendado(s) com sucesso.`);
+      renderCompany();
+    }
+
+    // Permite à Empresa corrigir data, horário e demais dados de UMA ocorrência específica
+    // (ex.: cliente mudou o horário ou o dia em cima da hora), sem afetar as demais datas de uma recorrência.
+    function openEditServiceModal(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+      const isRecurring = getServiceGroup(s).length > 1;
+
+      const modal = document.createElement('div');
+      modal.id = 'editServiceModal';
+      modal.className = 'fixed inset-0 z-[80] bg-slate-950/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4';
+      modal.innerHTML = `
+        <div class="w-full max-w-lg bg-white rounded-3xl p-5 sm:p-6 shadow-2xl max-h-[85vh] overflow-y-auto">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-widest font-black text-blue-600">Editar ordem de serviço</p>
+              <h3 class="text-xl font-black text-slate-900 mt-1">${escapeHTML(s.client)}</h3>
+            </div>
+            <button onclick="document.getElementById('editServiceModal').remove()" class="w-10 h-10 rounded-xl bg-slate-100 grid place-items-center shrink-0"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          ${isRecurring ? `<p class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3 mt-4"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Este serviço faz parte de uma recorrência. Por padrão, a alteração afeta <strong>somente esta data</strong> (${escapeHTML(serviceDateLabel(s))}).</p>` : ''}
+          <div class="space-y-4 mt-4">
+            <div>
+              <label class="block text-sm font-bold mb-2">Nome do cliente</label>
+              <input id="editServiceClient" value="${escapeHTML(s.client)}" maxlength="100" class="w-full px-4 py-3 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm font-bold mb-2">Serviço a ser feito</label>
+              <textarea id="editServiceName" rows="3" maxlength="240" class="w-full px-4 py-3 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500 resize-none">${escapeHTML(s.serviceName)}</textarea>
+            </div>
+            <div>
+              <label class="block text-sm font-bold mb-2">Endereço</label>
+              <input id="editServiceAddress" value="${escapeHTML(s.address || '')}" maxlength="240" class="w-full px-4 py-3 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-bold mb-2">Data</label>
+                <input id="editServiceDate" type="date" value="${s.date}" class="w-full px-3 py-3 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+              </div>
+              <div>
+                <label class="block text-sm font-bold mb-2">Horário</label>
+                <input id="editServiceTime" type="time" value="${s.time}" class="w-full px-3 py-3 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500">
+              </div>
+            </div>
+            ${isRecurring ? `
+              <label class="flex items-start gap-3 p-3 rounded-2xl bg-blue-50 border border-blue-200 cursor-pointer">
+                <input id="editApplyFuture" type="checkbox" class="mt-1 w-4 h-4 accent-blue-600">
+                <span class="text-sm text-blue-800">
+                  <strong>Aplicar a esta e a todas as próximas datas</strong> desta recorrência (cliente, serviço, endereço e horário).
+                  <br><span class="text-xs text-blue-600">A data digitada acima é alterada somente nesta ocorrência; as próximas datas mantêm seus próprios dias, só herdam os outros dados.</span>
+                </span>
+              </label>
+            ` : ''}
+          </div>
+          <button onclick="saveEditedService('${s.id}')" class="w-full mt-5 py-3.5 rounded-2xl bg-slate-900 text-white font-black hover:bg-slate-800">
+            <i class="fa-solid fa-check mr-2"></i> Salvar alterações
+          </button>
+        </div>`;
+      document.body.appendChild(modal);
+    }
+
+    function saveEditedService(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+
+      const client = document.getElementById('editServiceClient').value.trim();
+      const serviceName = document.getElementById('editServiceName').value.trim();
+      const address = document.getElementById('editServiceAddress').value.trim();
+      const date = document.getElementById('editServiceDate').value;
+      const time = document.getElementById('editServiceTime').value;
+      const applyToFuture = document.getElementById('editApplyFuture')?.checked || false;
+
+      if (!client || !serviceName || !address || !date || !time) {
+        toast('Preencha todos os campos do serviço.', 'error');
+        return;
+      }
+
+      if (applyToFuture) {
+        // Aplica cliente/serviço/endereço/horário a esta e a todas as próximas ocorrências da mesma
+        // recorrência (comparando pela data original desta ocorrência, antes da edição). Cada
+        // ocorrência mantém sua própria data — só a ocorrência editada tem a data efetivamente trocada.
+        const originalDate = s.date;
+        let affected = 0;
+        getServiceGroup(s).forEach(item => {
+          if (item.date >= originalDate) {
+            item.client = client;
+            item.serviceName = serviceName;
+            item.address = address;
+            item.time = time;
+            affected++;
+          }
+        });
+        s.date = date;
+        toast(`Alteração aplicada a esta e a mais ${Math.max(affected - 1, 0)} data(s) futura(s).`);
+      } else {
+        s.client = client;
+        s.serviceName = serviceName;
+        s.address = address;
+        s.date = date;
+        s.time = time;
+        toast('Ordem de serviço atualizada com sucesso.');
+      }
+
+      document.getElementById('editServiceModal')?.remove();
+      renderCompany();
+    }
+
+    // Permite à Empresa marcar um serviço específico como cancelado (com motivo), ex.: quando o
+    // cliente cancela em cima da hora. Fica registrado no serviço e visível no calendário.
+    function openCancelServiceModal(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+
+      const modal = document.createElement('div');
+      modal.id = 'cancelServiceModal';
+      modal.className = 'fixed inset-0 z-[80] bg-slate-950/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4';
+
+      if (s.cancelled) {
+        modal.innerHTML = `
+          <div class="w-full max-w-lg bg-white rounded-3xl p-5 sm:p-6 shadow-2xl">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <p class="text-xs uppercase tracking-widest font-black text-red-600">Serviço cancelado</p>
+                <h3 class="text-xl font-black text-slate-900 mt-1">${escapeHTML(s.client)} • ${escapeHTML(serviceDateLabel(s))}</h3>
+              </div>
+              <button onclick="document.getElementById('cancelServiceModal').remove()" class="w-10 h-10 rounded-xl bg-slate-100 grid place-items-center shrink-0"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="mt-4 p-4 rounded-2xl bg-red-50 border border-red-200">
+              <p class="text-xs font-black uppercase text-red-500">Motivo do cancelamento</p>
+              <p class="text-sm text-red-700 mt-1">${escapeHTML(s.cancelReason || 'Sem motivo informado.')}</p>
+            </div>
+            <button onclick="reactivateService('${s.id}')" class="w-full mt-5 py-3.5 rounded-2xl bg-slate-900 text-white font-black hover:bg-slate-800">
+              <i class="fa-solid fa-rotate-left mr-2"></i> Reativar este serviço
+            </button>
+          </div>`;
+      } else {
+        modal.innerHTML = `
+          <div class="w-full max-w-lg bg-white rounded-3xl p-5 sm:p-6 shadow-2xl">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <p class="text-xs uppercase tracking-widest font-black text-red-600">Cancelar serviço</p>
+                <h3 class="text-xl font-black text-slate-900 mt-1">${escapeHTML(s.client)} • ${escapeHTML(serviceDateLabel(s))}</h3>
+              </div>
+              <button onclick="document.getElementById('cancelServiceModal').remove()" class="w-10 h-10 rounded-xl bg-slate-100 grid place-items-center shrink-0"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <p class="text-sm text-slate-500 mt-4">Isso marca <strong>somente esta data</strong> como cancelada. O colaborador verá o aviso e não poderá postar ponto ou conteúdo para ela. Ficará registrado no calendário para consulta futura.</p>
+            <label class="block text-sm font-bold mt-4 mb-2">Motivo do cancelamento</label>
+            <textarea id="cancelReasonInput" rows="3" maxlength="300" required
+              class="w-full px-4 py-3 rounded-2xl border border-slate-300"
+              placeholder="Ex.: Cliente cancelou em cima da hora por motivo pessoal."></textarea>
+            <button onclick="cancelService('${s.id}')" class="w-full mt-5 py-3.5 rounded-2xl bg-red-600 text-white font-black hover:bg-red-700">
+              <i class="fa-solid fa-ban mr-2"></i> Confirmar cancelamento
+            </button>
+          </div>`;
+      }
+
+      document.body.appendChild(modal);
+    }
+
+    function cancelService(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+      const reason = document.getElementById('cancelReasonInput').value.trim();
+      if (!reason) {
+        toast('Informe o motivo do cancelamento.', 'error');
+        return;
+      }
+      s.cancelled = true;
+      s.cancelReason = reason;
+      s.cancelledAt = new Date().toISOString();
+      document.getElementById('cancelServiceModal')?.remove();
+      toast('Serviço marcado como cancelado.');
+      renderCompany();
+    }
+
+    function reactivateService(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+      s.cancelled = false;
+      s.cancelReason = null;
+      s.cancelledAt = null;
+      document.getElementById('cancelServiceModal')?.remove();
+      toast('Serviço reativado.');
+      renderCompany();
+    }
+
+    function recurrenceLabel(value) {
+      return ({
+        weekly: 'Semanal',
+        biweekly: 'A cada 2 semanas',
+        monthly: 'Mensal'
+      })[value] || 'Única';
+    }
+
+    // Verifica se um serviço já teve algum ponto registrado (Entrada ou Saída).
+    function serviceHasPonto(serviceId) {
+      return state.feed.some(item => item.type === 'ponto' && item.serviceId === serviceId);
+    }
+
+    function goCalendarMonth(delta) {
+      const key = state.calendarMonth || monthKey(todayISO());
+      const [y, m] = key.split('-').map(Number);
+      const d = new Date(y, m - 1 + delta, 1);
+      state.calendarMonth = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+      renderCompany();
+    }
+
+    function goCalendarToday() {
+      state.calendarMonth = monthKey(todayISO());
+      renderCompany();
+    }
+
+    function companyCalendarView() {
+      if (!state.calendarMonth) state.calendarMonth = monthKey(todayISO());
+      const [year, month] = state.calendarMonth.split('-').map(Number);
+      const today = todayISO();
+
+      const firstWeekday = new Date(year, month - 1, 1).getDay();
+      const daysInMonth = new Date(year, month, 0).getDate();
+      const weekdayLabels = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+
+      const cells = [];
+      for (let i = 0; i < firstWeekday; i++) cells.push(null);
+      for (let day = 1; day <= daysInMonth; day++) cells.push(`${year}-${pad(month)}-${pad(day)}`);
+
+      const cellHTML = (dateISO, day) => {
+        const servicesOfDay = state.services.filter(s => s.date === dateISO);
+        const total = servicesOfDay.length;
+        const cancelados = servicesOfDay.filter(s => s.cancelled).length;
+        const ativos = servicesOfDay.filter(s => !s.cancelled);
+        const realizados = ativos.filter(s => serviceHasPonto(s.id)).length;
+        const pendentes = ativos.length - realizados;
+        const isToday = dateISO === today;
+
+        let dotHTML = '';
+        if (total > 0) {
+          if (ativos.length === 0) dotHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span>';
+          else if (pendentes === 0) dotHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500"></span>';
+          else if (realizados === 0) dotHTML = '<span class="w-2 h-2 rounded-full bg-red-500"></span>';
+          else dotHTML = '<span class="w-2 h-2 rounded-full bg-amber-500"></span>';
+        }
+        const cancelDotHTML = cancelados > 0 && ativos.length > 0 ? '<span class="w-2 h-2 rounded-full bg-slate-400"></span>' : '';
+
+        return `
+          <button ${total ? `onclick="openCalendarDay('${dateISO}')"` : 'disabled'}
+            class="aspect-square rounded-xl sm:rounded-2xl border p-1.5 sm:p-2 flex flex-col items-center sm:items-start justify-between text-left transition
+              ${total ? 'border-slate-200 bg-white hover:border-blue-400 hover:shadow-md cursor-pointer' : 'border-slate-100 bg-slate-50 cursor-default'}
+              ${isToday ? 'ring-2 ring-blue-500' : ''}">
+            <span class="text-xs sm:text-sm font-black ${isToday ? 'text-blue-600' : 'text-slate-700'}">${day}</span>
+            ${total ? `
+              <div class="w-full flex items-center justify-between gap-1">
+                <span class="hidden sm:inline text-[10px] font-bold text-slate-400">${total} serv.</span>
+                <span class="flex items-center gap-1">${dotHTML}${cancelDotHTML}</span>
+              </div>
+            ` : ''}
+          </button>
+        `;
+      };
+
+      return `
+        <div class="mb-6 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+          <div>
+            <p class="text-sm font-bold text-blue-600 uppercase tracking-widest">Painel Gestor</p>
+            <h2 class="text-3xl font-black tracking-tight text-slate-900 mt-1"><i class="fa-solid fa-calendar-days mr-2"></i>Calendário de Serviços</h2>
+            <p class="text-slate-500 mt-2">Clique em um dia para ver os serviços agendados ou realizados.</p>
+          </div>
+        </div>
+
+        <div class="bg-white border border-slate-200 rounded-3xl p-4 sm:p-6 shadow-sm">
+          <div class="flex items-center justify-between gap-3 mb-5">
+            <button onclick="goCalendarMonth(-1)" class="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 grid place-items-center"><i class="fa-solid fa-chevron-left"></i></button>
+            <div class="text-center">
+              <h3 class="text-lg sm:text-xl font-black text-slate-900">${escapeHTML(monthLabel(state.calendarMonth))}</h3>
+              <button onclick="goCalendarToday()" class="text-xs font-bold text-blue-600 hover:underline">Ir para hoje</button>
+            </div>
+            <button onclick="goCalendarMonth(1)" class="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 grid place-items-center"><i class="fa-solid fa-chevron-right"></i></button>
+          </div>
+
+          <div class="grid grid-cols-7 gap-1.5 sm:gap-2 mb-2">
+            ${weekdayLabels.map(w => `<div class="text-center text-[10px] sm:text-xs font-black text-slate-400 uppercase">${w}</div>`).join('')}
+          </div>
+          <div class="grid grid-cols-7 gap-1.5 sm:gap-2">
+            ${cells.map(dateISO => dateISO ? cellHTML(dateISO, Number(dateISO.slice(8, 10))) : '<div></div>').join('')}
+          </div>
+
+          <div class="flex flex-wrap gap-4 mt-6 text-xs font-bold text-slate-500">
+            <span class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Todos realizados</span>
+            <span class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Parcialmente realizado</span>
+            <span class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-red-500"></span> Pendente</span>
+            <span class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span> Cancelado</span>
+          </div>
+        </div>
+      `;
+    }
+
+    function openCalendarDay(dateISO) {
+      const servicesOfDay = state.services.filter(s => s.date === dateISO);
+      const [y, m, d] = dateISO.split('-');
+      const label = new Date(Number(y), Number(m) - 1, Number(d)).toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+
+      const modal = document.createElement('div');
+      modal.id = 'calendarDayModal';
+      modal.className = 'fixed inset-0 z-[80] bg-slate-950/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4';
+      modal.innerHTML = `
+        <div class="w-full max-w-lg bg-white rounded-3xl p-5 sm:p-6 shadow-2xl max-h-[85vh] overflow-y-auto">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-widest font-black text-blue-600">Serviços do dia</p>
+              <h3 class="text-xl font-black text-slate-900 mt-1 capitalize">${escapeHTML(label)}</h3>
+            </div>
+            <button onclick="document.getElementById('calendarDayModal').remove()" class="w-10 h-10 rounded-xl bg-slate-100 grid place-items-center shrink-0"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+
+          <div class="space-y-3 mt-5">
+            ${servicesOfDay.length ? servicesOfDay.map(s => {
+              const c = getCollaborator(s.collaboratorId);
+              const realizado = serviceHasPonto(s.id);
+              const statusLabel = s.cancelled ? 'Cancelado' : (realizado ? 'Realizado' : 'Pendente');
+              const statusClass = s.cancelled ? 'bg-slate-200 text-slate-600' : (realizado ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600');
+              return `
+                <div class="border ${s.cancelled ? 'border-slate-200 bg-slate-50' : 'border-slate-200'} rounded-2xl p-4">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="font-black ${s.cancelled ? 'text-slate-500 line-through' : 'text-slate-900'} truncate">${escapeHTML(s.serviceName)}</p>
+                      <p class="text-xs text-slate-500 mt-1"><i class="fa-solid fa-user mr-1"></i>${escapeHTML(c ? c.name : 'Colaborador removido')}</p>
+                      <p class="text-xs text-slate-500 mt-1"><i class="fa-regular fa-clock mr-1"></i>${escapeHTML(s.time)} • <i class="fa-solid fa-building mr-1"></i>${escapeHTML(s.client)}</p>
+                      ${s.cancelled ? `<p class="text-xs text-red-600 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Motivo: ${escapeHTML(s.cancelReason || 'não informado')}</p>` : ''}
+                    </div>
+                    <span class="shrink-0 px-2.5 py-1 rounded-full text-xs font-black ${statusClass}">
+                      ${statusLabel}
+                    </span>
+                  </div>
+                </div>
+              `;
+            }).join('') : '<p class="text-sm text-slate-400 text-center py-6">Nenhum serviço agendado para este dia.</p>'}
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+    }
+
+    function companyFeedView() {
+      return `
+        <div class="mb-6 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+          <div>
+            <p class="text-sm font-bold text-blue-600 uppercase tracking-widest">Auditoria</p>
+            <h2 class="text-3xl font-black tracking-tight text-slate-900 mt-1">Feed de Auditoria</h2>
+            <p class="text-slate-500 mt-2">Registros enviados pelos colaboradores durante esta sessão.</p>
+          </div>
+          <span class="px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 text-xs font-black self-start sm:self-auto">
+            ${state.feed.length} registro(s)
+          </span>
+        </div>
+
+        ${state.feed.length ? `
+          <div class="grid md:grid-cols-2 2xl:grid-cols-3 gap-5">
+            ${state.feed.map(item => `
+              <article class="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm">
+                <img src="${item.image}" class="feed-media" alt="Registro de ${escapeHTML(item.type)}">
+                <div class="p-5">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-black uppercase tracking-wide
+                      ${item.type === 'ponto' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}">
+                      <i class="fa-solid ${item.type === 'ponto' ? 'fa-user-clock' : 'fa-camera'}"></i>
+                      ${item.type === 'ponto' ? `Ponto • ${escapeHTML(item.pointMode || '')}` : 'Conteúdo'}
+                    </span>
+                    <span class="text-xs text-slate-400">${formatDateTime(item.capturedAt)}</span>
+                  </div>
+
+                  <h3 class="font-black text-slate-900 mt-4">${escapeHTML(item.collaboratorName)}</h3>
+                  <p class="text-sm text-slate-500">${escapeHTML(item.collaboratorRole)}</p>
+
+                  <div class="mt-4 p-4 rounded-2xl bg-slate-50">
+                    <p class="text-xs uppercase tracking-widest text-slate-400 font-black">Cliente</p>
+                    <p class="font-bold mt-1">${escapeHTML(item.client)}</p>
+                    <p class="text-sm text-slate-600 mt-1">${escapeHTML(item.serviceName)}</p>
+                  </div>
+
+                  ${item.caption ? `
+                    <p class="mt-4 text-sm text-slate-700 leading-6">${escapeHTML(item.caption)}</p>
+                  ` : ''}
+
+                  <div class="mt-4 text-xs text-slate-500 space-y-1">
+                    <p><i class="fa-solid fa-location-crosshairs w-5"></i> Lat: ${item.lat.toFixed(6)}</p>
+                    <p><i class="fa-solid fa-location-crosshairs w-5"></i> Lon: ${item.lng.toFixed(6)}</p>
+                  </div>
+                </div>
+              </article>
+            `).join('')}
+          </div>
+        ` : emptyState('fa-camera-retro', 'Nenhum registro foi enviado ainda.')}
+      `;
+    }
+
+    function renderCollaboratorLogin() {
+      resetCaptureState();
+      state.currentProfile = 'collaborator';
+      state.currentCollaboratorId = null;
+      state.currentServiceId = null;
+
+      $app.innerHTML = `
+        ${brandHeader({title:'Acesso do colaborador', subtitle:'PontoVirtual', backAction:'renderProfileSelect()'})}
+
+        <main class="max-w-xl mx-auto px-4 py-8 sm:py-12">
+          <div class="bg-white border border-slate-200 rounded-3xl p-5 sm:p-7 shadow-sm">
+            <div class="w-14 h-14 rounded-2xl bg-slate-900 text-white grid place-items-center text-xl">
+              <i class="fa-solid fa-user-lock"></i>
+            </div>
+            <h2 class="text-2xl font-black text-slate-900 mt-5">Entrar na agenda</h2>
+            <p class="text-sm text-slate-500 mt-2">Informe seu login e PIN cadastrados pela empresa.</p>
+
+            ${state.collaborators.length ? `
+              <form onsubmit="loginCollaborator(event)" class="mt-6 space-y-4">
+                <div>
+                  <label class="block text-sm font-bold mb-2">Login</label>
+                  <input id="loginUsername" required maxlength="40" autocomplete="username"
+                    class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                    placeholder="Ex.: joao.silva">
+                </div>
+
+                <div>
+                  <label class="block text-sm font-bold mb-2">Senha / PIN</label>
+                  <input id="loginPin" required inputmode="numeric" maxlength="8" type="password" autocomplete="current-password"
+                    class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500"
+                    placeholder="Digite seu PIN">
+                </div>
+
+                <button class="w-full py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-black">
+                  Acessar minha agenda
+                </button>
+              </form>
+            ` : `
+              <div class="mt-6">
+                ${emptyState('fa-user-slash', 'Ainda não há colaboradores cadastrados pela empresa.')}
+              </div>
+            `}
+          </div>
+        </main>
+      `;
+    }
+
+    function loginCollaborator(event) {
+      event.preventDefault();
+
+      const username = document.getElementById('loginUsername').value.trim().toLowerCase();
+      const pin = document.getElementById('loginPin').value.trim();
+
+      const c = state.collaborators.find(item => item.login === username);
+
+      if (!c) {
+        toast('Login não encontrado.', 'error');
+        return;
+      }
+
+      if (c.pin !== pin) {
+        toast('Senha errada. Confira seu PIN e tente novamente.', 'error');
+        return;
+      }
+
+      state.currentCollaboratorId = c.id;
+      renderCollaboratorAgenda();
+    }
+
+    function renderCollaboratorAgenda() {
+      resetCaptureState();
+      const c = getCollaborator(state.currentCollaboratorId);
+      if (!c) return renderCollaboratorLogin();
+
+      const today = todayISO();
+      const services = state.services
+        .filter(s => s.collaboratorId === c.id && s.date === today)
+        .sort((a,b) => a.time.localeCompare(b.time));
+
+      $app.innerHTML = `
+        ${brandHeader({
+          title: c.name,
+          subtitle: `${c.role} • Agenda de hoje`,
+          backAction:'renderCollaboratorLogin()'
+        })}
+
+        <main class="max-w-3xl mx-auto px-4 py-6 sm:py-8 safe-bottom">
+          <div class="mb-6 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div>
+              <p class="text-sm font-bold text-blue-600 uppercase tracking-widest">Minha agenda</p>
+              <h2 class="text-3xl font-black tracking-tight text-slate-900 mt-1">Serviços de hoje</h2>
+              <p class="text-slate-500 mt-2">${new Date().toLocaleDateString('pt-BR', {weekday:'long', day:'2-digit', month:'long', year:'numeric'})}</p>
+            </div>
+          </div>
+
+          <button onclick="openPastContentPicker()"
+            class="group w-full text-left bg-amber-600 text-white rounded-3xl p-5 sm:p-6 shadow-lg shadow-amber-600/15 hover:-translate-y-1 transition mb-6 flex items-center gap-4">
+            <div class="w-12 h-12 shrink-0 rounded-2xl bg-white/15 grid place-items-center text-xl">
+              <i class="fa-solid fa-clock-rotate-left"></i>
+            </div>
+            <div class="min-w-0 flex-1">
+              <h3 class="text-lg font-black">Conteúdos Passados</h3>
+              <p class="text-sm text-amber-50 mt-1">Perdeu o prazo de um serviço? Envie o conteúdo aqui e escolha a qual serviço do mês ele pertence.</p>
+            </div>
+            <i class="fa-solid fa-chevron-right text-amber-100"></i>
+          </button>
+
+          <div class="space-y-4">
+            ${services.length ? services.map(s => {
+              const related = state.feed.filter(f => f.serviceId === s.id);
+              const pointCount = related.filter(f => f.type === 'ponto').length;
+              const contentCount = related.filter(f => f.type === 'conteudo').length;
+              return `
+                <button onclick="openService('${s.id}')"
+                  class="w-full text-left bg-white border ${s.cancelled ? 'border-red-200 bg-red-50/40' : 'border-slate-200'} rounded-3xl p-5 sm:p-6 shadow-sm hover:shadow-lg hover:border-slate-300 transition">
+                  <div class="flex items-start justify-between gap-4">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="px-3 py-1.5 rounded-full bg-slate-900 text-white text-xs font-black">${escapeHTML(s.time)}</span>
+                        <span class="px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 text-xs font-black">Hoje</span>
+                        ${s.cancelled ? '<span class="px-3 py-1.5 rounded-full bg-red-600 text-white text-xs font-black"><i class="fa-solid fa-ban mr-1"></i>Cancelado</span>' : ''}
+                      </div>
+                      <h3 class="text-xl font-black ${s.cancelled ? 'text-slate-500 line-through' : 'text-slate-900'} mt-4">${escapeHTML(s.client)}</h3>
+                      <p class="text-sm text-slate-600 mt-2 leading-6">${escapeHTML(s.serviceName)}</p>
+                      ${s.cancelled ? `<p class="text-xs text-red-600 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>${escapeHTML(s.cancelReason || 'Cancelado pela empresa.')}</p>` : ''}
+                    </div>
+                    <i class="fa-solid fa-chevron-right text-slate-300 mt-2"></i>
+                  </div>
+
+                  <div class="grid grid-cols-2 gap-3 mt-5">
+                    <div class="p-3 rounded-2xl bg-emerald-50 text-emerald-700">
+                      <p class="text-xs font-black uppercase tracking-wide">Pontos</p>
+                      <p class="text-lg font-black mt-1">${pointCount}</p>
+                    </div>
+                    <div class="p-3 rounded-2xl bg-amber-50 text-amber-700">
+                      <p class="text-xs font-black uppercase tracking-wide">Conteúdos</p>
+                      <p class="text-lg font-black mt-1">${contentCount}</p>
+                    </div>
+                  </div>
+                </button>
+              `;
+            }).join('') : emptyState('fa-calendar-xmark', 'Nenhum serviço foi agendado para você hoje.')}
+          </div>
+        </main>
+      `;
+    }
+
+    function openService(serviceId) {
+      state.currentServiceId = serviceId;
+      renderServiceDetail();
+    }
+
+    // Retorna todas as ocorrências do mesmo serviço recorrente (mesmo groupId).
+    // Serviços antigos sem groupId caem no fallback de conter apenas a própria ocorrência.
+    function getServiceGroup(service) {
+      if (!service) return [];
+      if (!service.groupId) return [service];
+      return state.services.filter(s => s.groupId === service.groupId);
+    }
+
+    function openPinCaptionModal(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+      const isRecurring = getServiceGroup(s).length > 1;
+
+      const modal = document.createElement('div');
+      modal.id = 'pinCaptionModal';
+      modal.className = 'fixed inset-0 z-[80] bg-slate-950/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4';
+      modal.innerHTML = `
+        <div class="w-full max-w-lg bg-white rounded-3xl p-5 sm:p-6 shadow-2xl">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-widest font-black text-blue-600">Legenda fixa</p>
+              <h3 class="text-xl font-black text-slate-900 mt-1">${escapeHTML(s.serviceName)}</h3>
+            </div>
+            <button onclick="document.getElementById('pinCaptionModal').remove()" class="w-10 h-10 rounded-xl bg-slate-100 grid place-items-center shrink-0"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <p class="text-sm text-slate-500 mt-4">Essa legenda será preenchida automaticamente sempre que você postar um ponto ou conteúdo deste serviço. Você ainda pode alterá-la em algum dia específico, sem afetar a fixação.</p>
+          ${isRecurring ? `<p class="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded-xl p-3 mt-3"><i class="fa-solid fa-repeat mr-1"></i>Este serviço se repete. A legenda fixa vale para todas as datas dessa recorrência.</p>` : ''}
+          <label class="block text-sm font-bold mt-4 mb-2">Legenda</label>
+          <textarea id="pinCaptionInput" rows="3" maxlength="280"
+            class="w-full px-4 py-3 rounded-2xl border border-slate-300"
+            placeholder="Ex.: Aula semanal de música com o aluno de terça-feira">${escapeHTML(s.defaultCaption || '')}</textarea>
+          <div class="grid ${s.defaultCaption ? 'grid-cols-2' : 'grid-cols-1'} gap-3 mt-5">
+            ${s.defaultCaption ? `<button onclick="removePinnedCaption('${s.id}')" class="py-3.5 rounded-2xl border border-red-200 text-red-600 font-black hover:bg-red-50"><i class="fa-solid fa-trash mr-2"></i>Remover</button>` : ''}
+            <button onclick="savePinnedCaption('${s.id}')" class="py-3.5 rounded-2xl bg-slate-900 text-white font-black hover:bg-slate-800"><i class="fa-solid fa-thumbtack mr-2"></i>Salvar</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+    }
+
+    function savePinnedCaption(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+      const caption = document.getElementById('pinCaptionInput').value.trim();
+      if (!caption) {
+        toast('Digite uma legenda para fixar.', 'error');
+        return;
+      }
+      getServiceGroup(s).forEach(item => { item.defaultCaption = caption; });
+      document.getElementById('pinCaptionModal')?.remove();
+      toast('Legenda fixa salva com sucesso.');
+      renderServiceDetail();
+    }
+
+    function removePinnedCaption(serviceId) {
+      const s = getService(serviceId);
+      if (!s) return;
+      getServiceGroup(s).forEach(item => { item.defaultCaption = null; });
+      document.getElementById('pinCaptionModal')?.remove();
+      toast('Legenda fixa removida.');
+      renderServiceDetail();
+    }
+
+    function renderServiceDetail() {
+      resetCaptureState();
+      const s = getService(state.currentServiceId);
+      const c = getCollaborator(state.currentCollaboratorId);
+      if (!s || !c) return renderCollaboratorAgenda();
+
+      const related = state.feed.filter(f => f.serviceId === s.id);
+
+      $app.innerHTML = `
+        ${brandHeader({
+          title: s.client,
+          subtitle: `${s.time} • ${c.name}`,
+          backAction:'renderCollaboratorAgenda()'
+        })}
+
+        <main class="max-w-3xl mx-auto px-4 py-6 sm:py-8 safe-bottom">
+          <div class="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <p class="text-xs font-black uppercase tracking-widest text-slate-400">Ordem de serviço</p>
+                <h2 class="text-2xl font-black text-slate-900 mt-2">${escapeHTML(s.client)}</h2>
+                <p class="text-slate-600 mt-2 leading-6">${escapeHTML(s.serviceName)}</p>
+                <p class="text-sm text-slate-500 mt-3"><i class="fa-solid fa-location-dot mr-1"></i>${escapeHTML(s.address || 'Endereço não informado')}</p>
+              </div>
+              <span class="shrink-0 px-3 py-1.5 rounded-full bg-slate-900 text-white text-xs font-black">${escapeHTML(s.time)}</span>
+            </div>
+          </div>
+
+          ${s.cancelled ? `
+            <div class="bg-red-50 border border-red-200 rounded-3xl p-5 sm:p-6 mt-4">
+              <p class="text-sm font-black text-red-700"><i class="fa-solid fa-ban mr-2"></i>Este serviço foi cancelado pela empresa.</p>
+              <p class="text-sm text-red-600 mt-2">Motivo: ${escapeHTML(s.cancelReason || 'não informado')}</p>
+              <p class="text-xs text-red-500 mt-2">Não é necessário postar ponto ou conteúdo para este serviço.</p>
+            </div>
+          ` : ''}
+
+          <div class="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm mt-4 flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <p class="text-xs font-black uppercase tracking-widest text-slate-400"><i class="fa-solid fa-thumbtack mr-1"></i>Legenda fixa</p>
+              ${s.defaultCaption
+                ? `<p class="text-sm text-slate-700 mt-2">${escapeHTML(s.defaultCaption)}</p>`
+                : `<p class="text-sm text-slate-400 mt-2">Nenhuma legenda fixa definida. Útil para serviços que se repetem sempre com a mesma descrição.</p>`}
+            </div>
+            <button onclick="openPinCaptionModal('${s.id}')"
+              class="shrink-0 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black">
+              <i class="fa-solid ${s.defaultCaption ? 'fa-pen' : 'fa-thumbtack'} mr-1"></i> ${s.defaultCaption ? 'Editar' : 'Fixar'}
+            </button>
+          </div>
+
+          ${s.cancelled ? '' : `
+          <div class="grid sm:grid-cols-2 gap-4 mt-5">
+            <button onclick="choosePointMode()"
+              class="group text-left bg-emerald-600 text-white rounded-3xl p-6 shadow-lg shadow-emerald-600/15 hover:-translate-y-1 transition">
+              <div class="w-12 h-12 rounded-2xl bg-white/15 grid place-items-center text-xl">
+                <i class="fa-solid fa-user-clock"></i>
+              </div>
+              <h3 class="text-xl font-black mt-5">Postar Ponto</h3>
+              <p class="text-sm text-emerald-50 mt-2">Registre entrada ou saída com foto, data, hora e GPS.</p>
+            </button>
+
+            <button onclick="openContentPicker(false)"
+              class="group text-left bg-slate-900 text-white rounded-3xl p-6 shadow-lg shadow-slate-900/15 hover:-translate-y-1 transition">
+              <div class="w-12 h-12 rounded-2xl bg-white/10 grid place-items-center text-xl">
+                <i class="fa-solid fa-folder-open"></i>
+              </div>
+              <h3 class="text-xl font-black mt-5">Enviar Conteúdo/Serviço</h3>
+              <p class="text-sm text-slate-300 mt-2">Selecione fotos, vídeos ou arquivos diretamente do dispositivo.</p>
+            </button>
+          </div>
+
+          <p class="text-xs text-slate-400 mt-4">
+            <i class="fa-solid fa-circle-info mr-1"></i>
+            Perdeu o prazo de um serviço? Use o botão <strong>Conteúdos Passados</strong> na sua agenda (fora de qualquer serviço aberto) para enviar depois.
+          </p>
+          `}
+
+          <div class="mt-7">
+            <div class="flex items-center justify-between gap-4 mb-4">
+              <h3 class="font-black text-lg text-slate-900">Registros deste serviço</h3>
+              <span class="text-xs font-black text-slate-400">${related.length} registro(s)</span>
+            </div>
+
+            <div class="space-y-3">
+              ${related.length ? related.map(item => `
+                <div class="bg-white border border-slate-200 rounded-2xl p-3 flex gap-3 items-center">
+                  <img src="${item.image}" alt="Registro" class="w-20 h-20 rounded-xl object-cover bg-slate-100">
+                  <div class="min-w-0 flex-1">
+                    <p class="text-xs font-black uppercase tracking-wide ${item.type === 'ponto' ? 'text-emerald-600' : 'text-amber-600'}">
+                      ${item.type === 'ponto' ? `Ponto • ${escapeHTML(item.pointMode || '')}` : 'Conteúdo'}
+                    </p>
+                    <p class="text-sm font-bold mt-1">${formatDateTime(item.capturedAt)}</p>
+                    <p class="text-xs text-slate-500 mt-1 truncate">${escapeHTML(item.caption || 'Sem legenda')}</p>
+                  </div>
+                </div>
+              `).join('') : emptyState('fa-camera', 'Nenhum registro publicado para este serviço ainda.')}
+            </div>
+          </div>
+        </main>
+      `;
+    }
+
+    function choosePointMode() {
+      const modal = document.createElement('div');
+      modal.id = 'pointModeModal';
+      modal.className = 'fixed inset-0 z-[80] bg-slate-950/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4';
+      modal.innerHTML = `
+        <div class="w-full max-w-md bg-white rounded-3xl p-5 sm:p-6 shadow-2xl">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p class="text-xs uppercase tracking-widest font-black text-slate-400">Tipo de ponto</p>
+              <h3 class="text-2xl font-black text-slate-900 mt-1">O que deseja registrar?</h3>
+            </div>
+            <button onclick="document.getElementById('pointModeModal').remove()" class="w-10 h-10 rounded-xl bg-slate-100 grid place-items-center">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3 mt-6">
+            <button onclick="startCapture('ponto','Entrada'); document.getElementById('pointModeModal')?.remove();"
+              class="p-5 rounded-2xl bg-emerald-600 text-white font-black">
+              <i class="fa-solid fa-right-to-bracket text-xl"></i>
+              <span class="block mt-3">Entrada</span>
+            </button>
+            <button onclick="startCapture('ponto','Saída'); document.getElementById('pointModeModal')?.remove();"
+              class="p-5 rounded-2xl bg-red-600 text-white font-black">
+              <i class="fa-solid fa-right-from-bracket text-xl"></i>
+              <span class="block mt-3">Saída</span>
+            </button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+
+
+    function openContentPicker(isPast = false, serviceId = state.currentServiceId, note = '') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt';
+      input.multiple = false;
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (file) uploadContentFile(file, { isPast, serviceId, note });
+      };
+      input.click();
+    }
+
+    function openPastContentPicker() {
+      const available = state.services.filter(s => s.collaboratorId === state.currentCollaboratorId && !s.cancelled);
+      if (!available.length) {
+        toast('Nenhum serviço encontrado para este colaborador.', 'error');
+        return;
+      }
+
+      // Agrupa os serviços por mês (mais recente primeiro) para facilitar a busca.
+      const byMonth = new Map();
+      [...available]
+        .sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`))
+        .forEach(s => {
+          const key = monthKey(s.date);
+          if (!byMonth.has(key)) byMonth.set(key, []);
+          byMonth.get(key).push(s);
+        });
+
+      const optionsHTML = [...byMonth.entries()].map(([key, list]) => `
+        <optgroup label="${escapeHTML(monthLabel(key))}">
+          ${list.map(s => `<option value="${s.id}">${escapeHTML(serviceDateLabel(s))} • ${escapeHTML(s.time)} • ${escapeHTML(s.client)} — ${escapeHTML(s.serviceName)}</option>`).join('')}
+        </optgroup>
+      `).join('');
+
+      const modal = document.createElement('div');
+      modal.id = 'pastContentModal';
+      modal.className = 'fixed inset-0 z-[80] bg-slate-950/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4';
+      modal.innerHTML = `
+        <div class="w-full max-w-lg bg-white rounded-3xl p-5 sm:p-6 shadow-2xl">
+          <div class="flex items-center justify-between gap-4"><div><p class="text-xs uppercase tracking-widest font-black text-amber-600">Envio atrasado</p><h3 class="text-2xl font-black text-slate-900 mt-1">Conteúdos Passados</h3></div><button onclick="document.getElementById('pastContentModal').remove()" class="w-10 h-10 rounded-xl bg-slate-100 grid place-items-center"><i class="fa-solid fa-xmark"></i></button></div>
+          <label class="block text-sm font-bold mt-5 mb-2">De qual serviço é este conteúdo? <span class="font-normal text-slate-400">(agrupado por mês)</span></label>
+          <select id="pastServiceSelect" class="w-full px-4 py-3 rounded-2xl border border-slate-300">${optionsHTML}</select>
+          <label class="block text-sm font-bold mt-4 mb-2">Motivo / observação (opcional)</label>
+          <textarea id="pastContentNote" rows="3" maxlength="500" class="w-full px-4 py-3 rounded-2xl border border-slate-300" placeholder="Ex.: Não consegui enviar no horário do serviço porque..."></textarea>
+          <button onclick="const sid=document.getElementById('pastServiceSelect').value; const note=document.getElementById('pastContentNote').value.trim(); document.getElementById('pastContentModal').remove(); openContentPicker(true,sid,note);" class="w-full mt-5 py-3.5 rounded-2xl bg-amber-600 text-white font-black"><i class="fa-solid fa-paperclip mr-2"></i>Escolher arquivo</button>
+        </div>`;
+      document.body.appendChild(modal);
+    }
+
+    function filePlaceholderDataURL(file) {
+      const label = (file.name || 'Arquivo').slice(0, 28).replace(/[<>&"]/g, '');
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600"><rect width="100%" height="100%" fill="#0f172a"/><text x="50%" y="45%" text-anchor="middle" fill="white" font-size="48" font-family="Arial">ARQUIVO</text><text x="50%" y="58%" text-anchor="middle" fill="#cbd5e1" font-size="24" font-family="Arial">${label}</text></svg>`;
+      return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    }
+
+    function uploadContentFile(file, { isPast = false, serviceId = state.currentServiceId, note = '' } = {}) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const s = getService(serviceId);
+        const c = getCollaborator(state.currentCollaboratorId);
+        if (!s || !c) { toast('Serviço ou colaborador não encontrado.', 'error'); return; }
+        const now = new Date();
+        const originalData = reader.result;
+        const image = file.type.startsWith('image/') ? originalData : filePlaceholderDataURL(file);
+        state.feed.unshift({
+          id: uid('feed'), serviceId: s.id, collaboratorId: c.id, type: 'conteudo', pointMode: null, image,
+          originalData, fileName: file.name, fileType: file.type || 'application/octet-stream', fileSize: file.size,
+          isPastContent: isPast, relatedServiceDate: s.date, pastNote: note,
+          caption: isPast ? `Conteúdo passado: ${file.name}${note ? ' — ' + note : ''}` : `Arquivo enviado: ${file.name}`,
+          capturedAt: now.toISOString(), dateISO: todayISO(), lat: state.currentPosition?.lat ?? null, lng: state.currentPosition?.lng ?? null,
+          accuracy: state.currentPosition?.accuracy ?? null, addressLabel: state.currentPosition?.addressLabel || '', collaboratorName: c.name,
+          collaboratorRole: c.role, client: s.client, serviceName: s.serviceName
+        });
+        toast(isPast ? 'Conteúdo passado enviado com sucesso.' : 'Conteúdo enviado com sucesso.');
+        if (isPast) {
+          renderCollaboratorAgenda();
+        } else {
+          renderServiceDetail();
+        }
+      };
+      reader.onerror = () => toast('Não foi possível ler o arquivo selecionado.', 'error');
+      reader.readAsDataURL(file);
+    }
+
+    function companyRecordsView(type) {
+      const title = type === 'ponto' ? 'Pontos' : 'Conteúdos';
+      const icon = type === 'ponto' ? 'fa-user-clock' : 'fa-folder-open';
+      const items = state.feed.filter(item => item.type === type);
+      const groups = state.collaborators.map(c => {
+        const collabItems = items.filter(item => item.collaboratorId === c.id);
+        const monthCount = new Set(collabItems.map(item => monthKey(item.dateISO))).size;
+        return { collaborator: c, items: collabItems, monthCount };
+      }).filter(group => group.items.length);
+
+      return `
+        <div class="mb-6">
+          <p class="text-sm font-bold text-blue-600 uppercase tracking-widest">Auditoria organizada</p>
+          <h2 class="text-3xl font-black tracking-tight text-slate-900 mt-1"><i class="fa-solid ${icon} mr-2"></i>${title}</h2>
+          <p class="text-slate-500 mt-2">Selecione um colaborador para visualizar os registros.</p>
+        </div>
+        <div class="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          ${groups.length ? groups.map(group => `
+            <button onclick="openCollaboratorRecords('${group.collaborator.id}','${type}')"
+              class="text-left bg-white border border-slate-200 rounded-3xl p-5 shadow-sm hover:border-blue-400 hover:shadow-md transition">
+              <div class="flex items-center gap-3">
+                <div class="w-12 h-12 rounded-2xl bg-blue-50 text-blue-700 grid place-items-center"><i class="fa-solid fa-user"></i></div>
+                <div class="min-w-0">
+                  <h3 class="font-black text-slate-900 truncate">${escapeHTML(group.collaborator.name)}</h3>
+                  <p class="text-xs text-slate-500">${group.items.length} registro(s) • ${group.monthCount} mês(es)</p>
+                </div>
+              </div>
+              <p class="text-xs text-blue-600 font-bold mt-4">Abrir registros <i class="fa-solid fa-arrow-right ml-1"></i></p>
+            </button>
+          `).join('') : emptyState(icon, `Nenhum registro de ${title.toLowerCase()} encontrado.`)}
+        </div>
+      `;
+    }
+
+    // Cartão de um registro (ponto ou conteúdo) usado nas listagens da Empresa.
+    function recordCardHTML(item) {
+      const isPonto = item.type === 'ponto';
+      return `
+        <article class="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+          <img src="${item.image}" alt="Registro" class="w-full h-48 object-cover bg-slate-100">
+          <div class="p-4">
+            <p class="text-xs font-black uppercase tracking-wide ${isPonto ? 'text-emerald-600' : 'text-amber-600'}">${isPonto ? `Ponto • ${escapeHTML(item.pointMode || '')}` : 'Conteúdo'}</p>
+            <p class="text-sm font-bold mt-2">${formatDateTime(item.capturedAt)}</p>
+            <p class="text-xs text-slate-500 mt-2">${escapeHTML(item.addressLabel || 'Endereço não disponível')}</p>
+            <p class="text-sm text-slate-600 mt-2">${escapeHTML(item.caption || item.fileName || 'Sem legenda')}</p>
+            ${item.isPastContent ? '<span class="inline-flex mt-3 px-2.5 py-1 rounded-full bg-amber-100 text-amber-700 text-xs font-black">Conteúdo passado</span>' : ''}
+            ${item.originalData ? `<a download="${escapeHTML(item.fileName || 'arquivo')}" href="${item.originalData}" class="inline-flex items-center gap-2 mt-3 px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-black hover:bg-blue-700"><i class="fa-solid fa-download"></i> Baixar original</a>` : '<p class="text-xs text-slate-400 mt-3">Arquivo original não disponível neste registro.</p>'}
+          </div>
+        </article>
+      `;
+    }
+
+    // Tela 1: ao clicar no nome do colaborador, mostra os MESES clicáveis (pontos + conteúdos juntos).
+    function openCollaboratorRecords(collaboratorId, type) {
+      const c = getCollaborator(collaboratorId);
+      if (!c) return;
+      const title = type === 'ponto' ? 'Pontos' : 'Conteúdos';
+
+      // Somente os registros do tipo desta aba (Pontos ou Conteúdos).
+      const items = state.feed.filter(item => item.collaboratorId === collaboratorId && item.type === type);
+
+      const byMonth = new Map();
+      items.forEach(item => {
+        const key = monthKey(item.dateISO);
+        if (!byMonth.has(key)) byMonth.set(key, []);
+        byMonth.get(key).push(item);
+      });
+      const monthGroups = [...byMonth.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+
+      $app.innerHTML = `
+        ${brandHeader({title: c.name, subtitle: `${title} • Selecione um mês`, backAction:`setCompanyTab('${type === 'ponto' ? 'points' : 'contents'}')`})}
+        <main class="max-w-5xl mx-auto px-4 py-6 sm:py-8">
+          <div class="flex items-center justify-between gap-4 mb-5">
+            <div>
+              <h2 class="text-2xl font-black text-slate-900">${title} de ${escapeHTML(c.name)}</h2>
+              <p class="text-sm text-slate-500">${items.length} registro(s) em ${monthGroups.length} mês(es). Clique em um mês para ver os ${title.toLowerCase()}.</p>
+            </div>
+          </div>
+          <div class="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+            ${monthGroups.length ? monthGroups.map(([key, monthItems]) => `
+                <button onclick="openCollaboratorMonthRecords('${collaboratorId}','${type}','${key}')"
+                  class="text-left bg-white border border-slate-200 rounded-3xl p-5 shadow-sm hover:border-blue-400 hover:shadow-md transition">
+                  <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 shrink-0 rounded-2xl bg-slate-900 text-white grid place-items-center"><i class="fa-regular fa-calendar"></i></div>
+                    <div class="min-w-0">
+                      <h3 class="font-black text-slate-900 truncate">${escapeHTML(monthLabel(key))}</h3>
+                      <p class="text-xs text-slate-500">${monthItems.length} ${title.toLowerCase()}</p>
+                    </div>
+                  </div>
+                  <p class="text-xs text-blue-600 font-bold mt-4">Ver registros <i class="fa-solid fa-arrow-right ml-1"></i></p>
+                </button>
+            `).join('') : emptyState('fa-calendar-xmark', `Nenhum registro de ${title.toLowerCase()} encontrado.`)}
+          </div>
+        </main>
+      `;
+    }
+
+    // Tela 2: ao clicar em um mês, mostra apenas os registros do tipo desta aba naquele mês.
+    function openCollaboratorMonthRecords(collaboratorId, type, key) {
+      const c = getCollaborator(collaboratorId);
+      if (!c) return;
+      const title = type === 'ponto' ? 'Pontos' : 'Conteúdos';
+
+      const items = state.feed
+        .filter(item => item.collaboratorId === collaboratorId && item.type === type && monthKey(item.dateISO) === key)
+        .sort((a, b) => new Date(b.capturedAt) - new Date(a.capturedAt));
+
+      $app.innerHTML = `
+        ${brandHeader({title: c.name, subtitle: `${title} • ${monthLabel(key)}`, backAction:`openCollaboratorRecords('${collaboratorId}','${type}')`})}
+        <main class="max-w-5xl mx-auto px-4 py-6 sm:py-8">
+          <div class="flex flex-wrap items-center justify-between gap-4 mb-5">
+            <div>
+              <h2 class="text-2xl font-black text-slate-900">${escapeHTML(monthLabel(key))} — ${escapeHTML(c.name)}</h2>
+              <p class="text-sm text-slate-500">${items.length} ${title.toLowerCase()}</p>
+            </div>
+          </div>
+          <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            ${items.length ? items.map(recordCardHTML).join('') : emptyState('fa-folder-open', `Nenhum registro de ${title.toLowerCase()} encontrado para este mês.`)}
+          </div>
+        </main>
+      `;
+    }
+
+    async function startCapture(type, pointMode = null) {
+      resetCaptureState();
+      state.captureType = type;
+      state.pointMode = pointMode;
+      renderCameraScreen();
+
+      const video = document.getElementById('cameraVideo');
+      if (!video) return;
+
+      // Solicita GPS real
+      if ('geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          position => {
+            state.currentPosition = {
+              lat: position.coords.latitude,
+              lng: position.coords.longitude,
+              accuracy: position.coords.accuracy,
+              addressLabel: 'Consultando endereço...'
+            };
+            updatePermissionStatus();
+            reverseGeocode(position.coords.latitude, position.coords.longitude);
+          },
+          error => {
+            state.gpsError = geolocationErrorMessage(error);
+            updatePermissionStatus();
+          },
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+      } else {
+        state.gpsError = 'Geolocalização não suportada neste navegador.';
+        updatePermissionStatus();
+      }
+
+      // Solicita câmera real priorizando traseira
+      try {
+        const constraints = {
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        };
+
+        state.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = state.mediaStream;
+        await video.play();
+        updatePermissionStatus();
+      } catch (err) {
+        state.cameraError = cameraErrorMessage(err);
+        updatePermissionStatus();
+      }
+    }
+
+
+    async function reverseGeocode(lat, lng) {
+      try {
+        const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!response.ok) throw new Error('Falha no endereço');
+        const data = await response.json();
+        const a = data.address || {};
+        const label = [a.road || a.pedestrian || a.footway, a.house_number, a.suburb || a.neighbourhood, a.city || a.town || a.municipality]
+          .filter(Boolean).join(', ');
+        if (state.currentPosition) {
+          state.currentPosition.addressLabel = label || data.display_name || 'Endereço não identificado';
+          updatePermissionStatus();
+        }
+      } catch (error) {
+        if (state.currentPosition) {
+          state.currentPosition.addressLabel = 'Endereço não identificado';
+          updatePermissionStatus();
+        }
+      }
+    }
+
+    function geolocationErrorMessage(error) {
+      if (!error) return 'Não foi possível obter sua localização.';
+      if (error.code === 1) return 'Permissão de localização negada.';
+      if (error.code === 2) return 'Localização indisponível.';
+      if (error.code === 3) return 'Tempo esgotado ao buscar localização.';
+      return 'Não foi possível obter sua localização.';
+    }
+
+    function cameraErrorMessage(error) {
+      const name = error?.name || '';
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') return 'Permissão de câmera negada.';
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'Nenhuma câmera disponível.';
+      if (name === 'NotReadableError' || name === 'TrackStartError') return 'A câmera está sendo usada por outro aplicativo.';
+      return 'Não foi possível acessar a câmera.';
+    }
+
+    function renderCameraScreen() {
+      const s = getService(state.currentServiceId);
+      const c = getCollaborator(state.currentCollaboratorId);
+      if (!s || !c) return renderServiceDetail();
+
+      const typeLabel = state.captureType === 'ponto'
+        ? `Ponto${state.pointMode ? ' • ' + state.pointMode : ''}`
+        : 'Conteúdo';
+
+      $app.innerHTML = `
+        <div class="min-h-[100dvh] bg-slate-950 text-white">
+          <header class="absolute z-30 top-0 inset-x-0">
+            <div class="max-w-5xl mx-auto px-4 pt-4 flex items-center justify-between gap-4">
+              <button onclick="cancelCapture()" class="w-11 h-11 rounded-2xl bg-black/45 backdrop-blur-md grid place-items-center border border-white/10">
+                <i class="fa-solid fa-xmark"></i>
+              </button>
+              <div class="px-4 py-2 rounded-full bg-black/45 backdrop-blur-md border border-white/10 text-xs font-black uppercase tracking-widest">
+                ${escapeHTML(typeLabel)}
+              </div>
+              <div class="w-11"></div>
+            </div>
+          </header>
+
+          <main class="max-w-5xl mx-auto min-h-[100dvh] flex flex-col">
+            <section class="camera-stage flex-1">
+              <video id="cameraVideo" autoplay playsinline muted></video>
+              <div class="camera-overlay"></div>
+
+              <div id="permissionStatus" class="absolute z-20 left-4 right-4 bottom-28">
+                ${permissionStatusHTML()}
+              </div>
+
+              <button id="shutterBtn" onclick="capturePhoto()"
+                class="shutter absolute z-30 left-1/2 -translate-x-1/2 bottom-5"
+                aria-label="Tirar foto"></button>
+            </section>
+
+            <section class="bg-slate-950 p-4 sm:p-5 safe-bottom">
+              <div class="flex items-center justify-between gap-4 text-xs text-slate-400">
+                <span><i class="fa-solid fa-building mr-1"></i>${escapeHTML(s.client)}</span>
+                <span><i class="fa-regular fa-clock mr-1"></i>${escapeHTML(s.time)}</span>
+              </div>
+            </section>
+          </main>
+        </div>
+      `;
+    }
+
+    function permissionStatusHTML() {
+      const gpsOK = !!state.currentPosition;
+      const gpsFailed = !!state.gpsError && !gpsOK;
+      const camOK = !!state.mediaStream;
+      const hasError = state.cameraError;
+
+      return `
+        <div class="rounded-2xl bg-black/55 backdrop-blur-md border border-white/10 p-3">
+          <div class="flex flex-wrap gap-2">
+            <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full ${camOK ? 'bg-emerald-500/20 text-emerald-200' : 'bg-white/10 text-white'} text-xs font-bold">
+              <i class="fa-solid ${camOK ? 'fa-circle-check' : 'fa-camera'}"></i>
+              ${camOK ? 'Câmera pronta' : 'Solicitando câmera'}
+            </span>
+            <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full ${gpsOK ? 'bg-emerald-500/20 text-emerald-200' : gpsFailed ? 'bg-red-500/20 text-red-200' : 'bg-white/10 text-white'} text-xs font-bold">
+              <i class="fa-solid ${gpsOK ? 'fa-circle-check' : gpsFailed ? 'fa-location-crosshairs-slash' : 'fa-location-crosshairs'}"></i>
+              ${gpsOK ? 'GPS obtido' : gpsFailed ? 'Sem localização' : 'Obtendo GPS'}
+            </span>
+            ${gpsOK && state.currentPosition.addressLabel ? `<span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/10 text-white text-xs font-bold"><i class="fa-solid fa-road"></i>${escapeHTML(state.currentPosition.addressLabel)}</span>` : ''}
+            </span>
+          </div>
+          ${hasError || gpsFailed ? `
+            <div class="mt-2 text-xs text-red-200">
+              ${state.cameraError ? `<p>${escapeHTML(state.cameraError)}</p>` : ''}
+              ${gpsFailed ? `<p>${escapeHTML(state.gpsError)} A foto pode ser feita mesmo assim, marcada como "Sem localização".</p>` : ''}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    function updatePermissionStatus() {
+      const el = document.getElementById('permissionStatus');
+      if (el) el.innerHTML = permissionStatusHTML();
+    }
+
+    function cancelCapture() {
+      resetCaptureState();
+      renderServiceDetail();
+    }
+
+    function capturePhoto() {
+      const video = document.getElementById('cameraVideo');
+
+      if (!state.mediaStream || !video || video.videoWidth === 0) {
+        toast('A câmera ainda não está pronta.', 'error');
+        return;
+      }
+
+      const hasLocation = !!state.currentPosition;
+      if (!hasLocation) {
+        toast('Localização não disponível. A foto será registrada como "Sem localização".', 'info');
+      }
+
+      const maxWidth = 1600;
+      const scale = Math.min(1, maxWidth / video.videoWidth);
+      const width = Math.round(video.videoWidth * scale);
+      const height = Math.round(video.videoHeight * scale);
+
+      $canvas.width = width;
+      $canvas.height = height;
+
+      const ctx = $canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, width, height);
+
+      const now = new Date();
+      const s = getService(state.currentServiceId);
+      const c = getCollaborator(state.currentCollaboratorId);
+
+      const typeLabel = state.captureType === 'ponto'
+        ? `PONTO ${state.pointMode ? '- ' + state.pointMode.toUpperCase() : ''}`
+        : 'CONTEÚDO';
+
+      // Marca d'água "queimada" diretamente nos pixels da imagem.
+      const footerHeight = Math.max(155, Math.round(height * 0.19));
+      const padding = Math.max(20, Math.round(width * 0.022));
+      const fontBase = Math.max(16, Math.round(width * 0.018));
+
+      const gradient = ctx.createLinearGradient(0, height - footerHeight, 0, height);
+      gradient.addColorStop(0, 'rgba(0,0,0,0.18)');
+      gradient.addColorStop(1, 'rgba(0,0,0,0.88)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, height - footerHeight, width, footerHeight);
+
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `800 ${fontBase + 3}px Arial, sans-serif`;
+      ctx.fillText(`PontoVirtual • ${typeLabel}`, padding, height - footerHeight + padding);
+
+      ctx.font = `600 ${fontBase}px Arial, sans-serif`;
+      ctx.fillStyle = 'rgba(255,255,255,.96)';
+      ctx.fillText(`Data/Hora: ${formatDateTime(now)}`, padding, height - footerHeight + padding + fontBase + 14);
+
+      ctx.font = `600 ${fontBase}px Arial, sans-serif`;
+      if (hasLocation) {
+        ctx.fillText(
+          `GPS: ${state.currentPosition.lat.toFixed(6)}, ${state.currentPosition.lng.toFixed(6)}`,
+          padding,
+          height - footerHeight + padding + (fontBase + 14) * 2
+        );
+        ctx.fillText(
+          `Local: ${(state.currentPosition.addressLabel || 'Endereço não identificado').slice(0, 95)}`,
+          padding,
+          height - footerHeight + padding + (fontBase + 14) * 3
+        );
+      } else {
+        ctx.fillStyle = '#fca5a5';
+        ctx.fillText(
+          'GPS: Sem localização',
+          padding,
+          height - footerHeight + padding + (fontBase + 14) * 2
+        );
+        ctx.fillStyle = 'rgba(255,255,255,.96)';
+        ctx.fillText(
+          `Local: Sem localização${state.gpsError ? ' — ' + state.gpsError : ''}`.slice(0, 95),
+          padding,
+          height - footerHeight + padding + (fontBase + 14) * 3
+        );
+      }
+
+      state.capturedImage = $canvas.toDataURL('image/jpeg', 0.9);
+      state.capturedMeta = {
+        capturedAt: now.toISOString(),
+        dateISO: todayISO(),
+        lat: hasLocation ? state.currentPosition.lat : null,
+        lng: hasLocation ? state.currentPosition.lng : null,
+        accuracy: hasLocation ? state.currentPosition.accuracy : null,
+        addressLabel: hasLocation ? (state.currentPosition.addressLabel || '') : 'Sem localização',
+        hasLocation,
+        collaboratorName: c.name,
+        collaboratorRole: c.role,
+        client: s.client,
+        serviceName: s.serviceName,
+      };
+
+      stopCamera();
+      renderCapturePreview();
+    }
+
+    function renderCapturePreview() {
+      const s = getService(state.currentServiceId);
+      const typeLabel = state.captureType === 'ponto'
+        ? `Ponto • ${state.pointMode || ''}`
+        : 'Conteúdo';
+
+      $app.innerHTML = `
+        ${brandHeader({
+          title:'Revisar registro',
+          subtitle:typeLabel,
+          backAction:'retakePhoto()'
+        })}
+
+        <main class="max-w-3xl mx-auto px-4 py-6 sm:py-8 safe-bottom">
+          <div class="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm">
+            <img src="${state.capturedImage}" alt="Foto capturada" class="w-full max-h-[65vh] object-contain bg-slate-950">
+
+            <div class="p-5 sm:p-6">
+              <div class="flex flex-wrap items-center gap-2 mb-5">
+                <span class="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 text-xs font-black">${escapeHTML(typeLabel)}</span>
+                <span class="px-3 py-1.5 rounded-full ${state.capturedMeta?.hasLocation ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-600'} text-xs font-black">
+                  <i class="fa-solid ${state.capturedMeta?.hasLocation ? 'fa-location-dot' : 'fa-location-crosshairs-slash'} mr-1"></i> ${state.capturedMeta?.hasLocation ? 'GPS gravado' : 'Sem localização'}
+                </span>
+              </div>
+
+              <label class="block text-sm font-bold mb-2">Legenda / descrição rápida</label>
+              <textarea id="captureCaption" maxlength="280" rows="3"
+                class="w-full px-4 py-3.5 rounded-2xl border border-slate-300 focus:outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-500 resize-none"
+                placeholder="${state.captureType === 'ponto' ? 'Ex.: Chegada ao local do serviço' : 'Ex.: Equipamento revisado e funcionando normalmente'}">${escapeHTML(s?.defaultCaption || '')}</textarea>
+              ${s?.defaultCaption ? '<p class="text-xs text-slate-400 mt-2"><i class="fa-solid fa-thumbtack mr-1"></i>Legenda fixa aplicada. Você pode alterá-la só para este envio, sem afetar a fixação.</p>' : ''}
+
+              <div class="grid sm:grid-cols-2 gap-3 mt-5">
+                <button onclick="retakePhoto()"
+                  class="py-3.5 rounded-2xl border border-slate-300 font-black hover:bg-slate-50">
+                  <i class="fa-solid fa-rotate-left mr-2"></i> Tirar outra
+                </button>
+
+                <button onclick="submitCapture()"
+                  class="py-3.5 rounded-2xl bg-slate-900 text-white font-black hover:bg-slate-800">
+                  <i class="fa-solid fa-paper-plane mr-2"></i> Confirmar e Enviar
+                </button>
+              </div>
+
+              <p class="text-xs text-slate-400 mt-4">
+                Cliente: ${escapeHTML(s?.client || '')}
+              </p>
+            </div>
+          </div>
+        </main>
+      `;
+    }
+
+    function retakePhoto() {
+      const type = state.captureType;
+      const pointMode = state.pointMode;
+      startCapture(type, pointMode);
+    }
+
+    function submitCapture() {
+      if (!state.capturedImage || !state.capturedMeta) {
+        toast('Nenhuma imagem pronta para envio.', 'error');
+        return;
+      }
+
+      const caption = document.getElementById('captureCaption')?.value.trim() || '';
+      const s = getService(state.currentServiceId);
+      const c = getCollaborator(state.currentCollaboratorId);
+
+      if (!s || !c) {
+        toast('Serviço ou colaborador não encontrado.', 'error');
+        return;
+      }
+
+      state.feed.unshift({
+        id: uid('feed'),
+        serviceId: s.id,
+        collaboratorId: c.id,
+        type: state.captureType,
+        pointMode: state.captureType === 'ponto' ? state.pointMode : null,
+        image: state.capturedImage,
+        caption,
+        ...state.capturedMeta
+      });
+
+      resetCaptureState();
+      toast('Registro enviado ao Feed de Auditoria.');
+      renderServiceDetail();
+    }
+
+    // Render inicial
+    renderProfileSelect();
+
+    // Ao sair/ocultar a página, encerra câmera por privacidade.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && state.mediaStream) {
+        stopCamera();
+      }
+    });
+
+    window.addEventListener('beforeunload', stopCamera);
+  </script>
+</body>
+</html>
